@@ -1,0 +1,114 @@
+services:
+
+  # ── Production DB (korunan) ───────────────────────────────────────────────
+  prod_db:
+    image: postgres:16-alpine
+    container_name: guardian_prod_db
+    environment:
+      POSTGRES_DB: guardian_prod
+      POSTGRES_USER: guardian
+      POSTGRES_PASSWORD: guardian_secret
+    volumes:
+      - prod_data:/var/lib/postgresql/data
+      - ./scripts/seed_prod.sql:/docker-entrypoint-initdb.d/seed.sql
+    networks:
+      - guardian_internal   # Production DB sadece iç ağda
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guardian -d guardian_prod"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Clone DB (test ortamı) ────────────────────────────────────────────────
+  clone_db:
+    image: postgres:16-alpine
+    container_name: guardian_clone_db
+    environment:
+      POSTGRES_DB: guardian_clone
+      POSTGRES_USER: guardian
+      POSTGRES_PASSWORD: guardian_secret
+    volumes:
+      - clone_data:/var/lib/postgresql/data
+    networks:
+      - guardian_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guardian -d guardian_clone"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Uygulama DB (audit log, kullanıcılar) ─────────────────────────────────
+  app_db:
+    image: postgres:16-alpine
+    container_name: guardian_app_db
+    environment:
+      POSTGRES_DB: guardian_app
+      POSTGRES_USER: guardian
+      POSTGRES_PASSWORD: guardian_secret
+    volumes:
+      - app_data:/var/lib/postgresql/data
+    networks:
+      - guardian_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guardian -d guardian_app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Guardian API ──────────────────────────────────────────────────────────
+  guardian:
+    build: .
+    container_name: guardian_api
+    ports:
+      - "8000:8000"          # SADECE bu port dışarıya açık
+    environment:
+      PROD_DB_HOST: prod_db
+      PROD_DB_PORT: 5432
+      PROD_DB_NAME: guardian_prod
+      PROD_DB_USER: guardian
+      PROD_DB_PASSWORD: guardian_secret
+      CLONE_DB_HOST: clone_db
+      CLONE_DB_PORT: 5432
+      CLONE_DB_NAME: guardian_clone
+      CLONE_DB_USER: guardian
+      CLONE_DB_PASSWORD: guardian_secret
+      APP_DB_HOST: app_db
+      APP_DB_PORT: 5432
+      APP_DB_NAME: guardian_app
+      APP_DB_USER: guardian
+      APP_DB_PASSWORD: guardian_secret
+      JWT_SECRET_KEY: "mvp-secret-change-in-production-please"
+      JWT_EXPIRE_MINUTES: 60
+      BREAKGLASS_TIMEOUT_SECONDS: 900
+      BACKUP_DIR: /backups
+      APP_ENV: development
+      LOG_LEVEL: INFO
+    volumes:
+      - backups:/backups
+    networks:
+      - guardian_internal    # Guardian iç ağa bağlı (DB'lere erişebilir)
+      - guardian_public      # Sadece guardian'ın portu dışarıya açık
+    depends_on:
+      prod_db:
+        condition: service_healthy
+      clone_db:
+        condition: service_healthy
+      app_db:
+        condition: service_healthy
+
+# ── Ağlar ─────────────────────────────────────────────────────────────────
+# Production DB, clone DB ve app DB yalnızca iç ağda (guardian_internal).
+# Dışarıdan doğrudan bağlanmak MÜMKÜN DEĞİL.
+# Yazılımcılar yalnızca Guardian API'ye (8000) erişebilir.
+networks:
+  guardian_internal:
+    internal: true          # ← Dışarıya kapalı
+  guardian_public:
+    driver: bridge
+
+# ── Volume'lar ─────────────────────────────────────────────────────────────
+volumes:
+  prod_data:
+  clone_data:
+  app_data:
+  backups:
