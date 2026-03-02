@@ -18,7 +18,6 @@ from src.audit.logger import log_event
 from src.breakglass.manager import breakglass_manager
 from src.core.backup import backup_engine
 from src.core.clone_engine import clone_engine
-from src.core.command_filter import FilterDecision, check as filter_check
 from src.core.decision_engine import decision_engine
 from src.core.diff_analyzer import diff_analyzer, take_db_snapshot
 from src.core.migration_queue import MigrationJob, migration_queue
@@ -30,10 +29,10 @@ from src.models.schemas import (
     ExecuteResponse,
     JobStatus,
     JobStatusResponse,
-    RiskLevel,
     SystemMode,
 )
 from src.monitor.modes import system_mode
+from src.notifications.notifier import notification_service
 
 logger = logging.getLogger("guardian.gateway")
 
@@ -52,12 +51,23 @@ async def execute_sql(
     SQL komutunu Guardian pipeline'ına gönderir.
 
     1. Bakım modunda ise yazma reddedilir.
-    2. Tehlikeli komut filtresi çalışır.
-    3. Güvenli komutlar kuyruğa alınır, arka planda işlenir.
+    2. Komut kuyruğa alınır — SQL metnine bakılmaksızın.
+    3. Arka planda: klon oluştur → SQL'i uygula → diff → karar.
+       Karar tamamen gerçek diff sonucuna dayanır, tahmine değil.
     """
     username = current_user["username"]
 
-    # ── 1. Bakım modu kontrolü ───────────────────────────────────────────
+    # ── 1. İzleme modu kontrolü ───────────────────────────────────────────    # Davranış: İzleme modunda pipeline NORMAL çalışır; komut production'a
+    # uygulanır. Farkı: her komut ekstra MONITORING_MODE audit event'i üretir.
+    # Bu, sistemin tüm hareketleri gözlemlendiği savaş-gäncelik modudur.
+    # Eğer ileride "izle ama uygulama" isteniyor ise pipeline sonunda
+    # return eklenebilir; ancak mevcut tasarım "loglama + devam" şeklindedir.    if system_mode.is_monitoring:
+        log_event(
+            db, actor=username, action="MONITORING_MODE",
+            sql_command=req.sql,
+            details={"note": "İzleme modunda — komut geçirildi, loglandı."},
+        )
+
     if system_mode.is_maintenance:
         log_event(
             db, actor=username, action="BLOCKED_MAINTENANCE",
@@ -69,27 +79,9 @@ async def execute_sql(
             detail="Sistem bakım modunda. Yazma işlemleri geçici olarak durdurulmuş.",
         )
 
-    # ── 2. Komut filtresi ─────────────────────────────────────────────────
-    filter_result = filter_check(req.sql)
-
-    if filter_result.decision == FilterDecision.INSTANT_BLOCK:
-        log_event(
-            db, actor=username, action="INSTANT_BLOCK",
-            sql_command=req.sql, decision="INSTANT_BLOCK",
-            risk_level="CRITICAL",
-            details={"rule": filter_result.matched_rule, "reason": filter_result.reason},
-        )
-        return ExecuteResponse(
-            job_id="N/A",
-            status=JobStatus.BLOCKED,
-            decision=DecisionResult.INSTANT_BLOCK,
-            message=filter_result.reason,
-            risk_level=RiskLevel.CRITICAL,
-            submitted_by=username,
-            submitted_at=datetime.utcnow(),
-        )
-
-    # ── 3. Kuyruğa ekle ───────────────────────────────────────────────────
+    # ── 2. Kuyruğa ekle ───────────────────────────────────────────────────
+    # Karar SQL metnine değil, klon üzerindeki gerçek diff'e göre verilir.
+    # Her sorgu — SELECT dahil — pipeline'dan geçer.
     job = migration_queue.add_job(
         sql=req.sql,
         submitted_by=username,
@@ -100,7 +92,7 @@ async def execute_sql(
     log_event(
         db, actor=username, action="QUEUED",
         job_id=job.job_id, sql_command=req.sql,
-        details={"description": req.description, "filter": filter_result.decision},
+        details={"description": req.description},
     )
 
     return ExecuteResponse(
@@ -133,13 +125,18 @@ def get_job_status(
         processed_at=job.processed_at,
         message=job.message,
         diff_summary=job.diff_summary,
+        snapshot_path=getattr(job, "snapshot_path", None),
+        can_rollback=(
+            job.status == JobStatus.APPLIED
+            and bool(getattr(job, "snapshot_path", None))
+        ),
     )
 
 
 @router.get("/jobs")
 def list_jobs(_admin=Depends(require_role("admin", "manager"))):
     """Tüm işleri listeler."""
-    jobs = list(migration_queue._jobs.values())
+    jobs = migration_queue.list_jobs()
     return {
         "total": len(jobs),
         "jobs": [
@@ -150,7 +147,7 @@ def list_jobs(_admin=Depends(require_role("admin", "manager"))):
                 "submitted_by": j.submitted_by,
                 "submitted_at": j.submitted_at.isoformat(),
             }
-            for j in sorted(jobs, key=lambda x: x.submitted_at, reverse=True)
+            for j in jobs
         ],
     }
 
@@ -195,10 +192,15 @@ async def _run_pipeline(job: MigrationJob, db):
         log_event(db, actor="guardian", action="SNAPSHOT_FAILED", job_id=jid,
                   details={"error": snap.get("error")})
     else:
+        job.snapshot_path = snap.get("path")   # rollback için sakla
         log_event(db, actor="guardian", action="SNAPSHOT_OK", job_id=jid,
                   details={"file": snap.get("filename"), "elapsed": snap.get("elapsed")})
 
-    # ── Aşama 2: Klon oluştur ─────────────────────────────────────────────
+    # ── Aşama 2: Production snapshot al (diff için) ───────────────────────
+    from src.config import settings
+    prod_snapshot = take_db_snapshot(settings.prod_dsn)
+
+    # ── Aşama 3: Klon oluştur ─────────────────────────────────────────────
     log_event(db, actor="guardian", action="CLONE_START", job_id=jid)
     clone_result = clone_engine.create_clone(jid)
     if not clone_result["success"]:
@@ -210,10 +212,6 @@ async def _run_pipeline(job: MigrationJob, db):
         return
     log_event(db, actor="guardian", action="CLONE_OK", job_id=jid,
               details={"elapsed": clone_result.get("elapsed")})
-
-    # ── Aşama 3: Production snapshot al (diff için) ───────────────────────
-    from src.config import settings
-    prod_snapshot = take_db_snapshot(settings.prod_dsn)
 
     # ── Aşama 4: SQL'i klona uygula ──────────────────────────────────────
     log_event(db, actor="guardian", action="APPLY_TO_CLONE", job_id=jid,
@@ -234,6 +232,8 @@ async def _run_pipeline(job: MigrationJob, db):
               details={"summary": diff.summary, "total_row_loss": diff.total_row_loss})
 
     # ── Aşama 6: Karar ───────────────────────────────────────────────────
+    # Karar tamamen diff sonucuna dayanır — SQL metnine, tahmine dayalı
+    # kural eşleşmesine bakılmaz. Gerçek diff ne söylüyorsa o geçerlidir.
     decision, decision_msg = decision_engine.decide(diff, apply_error)
     job.risk_level = diff.risk_level
     job.diff_summary = {
@@ -254,6 +254,10 @@ async def _run_pipeline(job: MigrationJob, db):
         job.message = decision_msg
         job.processed_at = datetime.utcnow()
         logger.warning(f"[{jid}] BLOK: {decision_msg}")
+        await notification_service.notify(
+            "BLOCK", jid, job.submitted_by,
+            {"mesaj": decision_msg, "sql": job.sql[:80]},
+        )
         return
 
     if decision == DecisionResult.MANUAL_REVIEW:
@@ -268,6 +272,10 @@ async def _run_pipeline(job: MigrationJob, db):
         )
         log_event(db, actor="guardian", action="BREAKGLASS_REQUESTED", job_id=jid,
                   details={"reason": decision_msg})
+        await notification_service.notify(
+            "MANUAL_REVIEW", jid, job.submitted_by,
+            {"risk": diff.risk_level, "neden": decision_msg, "sql": job.sql[:80]},
+        )
 
         # İki yönetici onayını bekle
         approved = await breakglass_manager.wait_for_approval(jid)
@@ -278,10 +286,18 @@ async def _run_pipeline(job: MigrationJob, db):
             job.processed_at = datetime.utcnow()
             system_mode.enter_maintenance("Break-glass onayı alınamadı.")
             log_event(db, actor="guardian", action="BREAKGLASS_TIMEOUT", job_id=jid)
+            await notification_service.notify(
+                "BREAKGLASS_TIMEOUT", jid, job.submitted_by,
+                {"sql": job.sql[:80]},
+            )
             return
 
         log_event(db, actor="guardian", action="BREAKGLASS_APPROVED", job_id=jid,
                   details={"approvals": session.approvals})
+        await notification_service.notify(
+            "BREAKGLASS_APPROVED", jid, job.submitted_by,
+            {"onaylayanlar": str(session.approvals)},
+        )
 
     # ── Aşama 7: Production'a uygula ─────────────────────────────────────
     log_event(db, actor="guardian", action="APPLY_TO_PROD", job_id=jid,

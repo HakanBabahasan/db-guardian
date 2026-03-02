@@ -47,6 +47,26 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", alias="APP_ENV")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    # ── Bildirimler — Slack ──────────────────────────────────
+    slack_webhook_url: str | None = Field(default=None, alias="SLACK_WEBHOOK_URL")
+
+    # ── Bildirimler — SMTP ───────────────────────────────────
+    smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_user: str = Field(default="", alias="SMTP_USER")
+    smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
+    smtp_from: str = Field(default="guardian@guardian.local", alias="SMTP_FROM")
+    smtp_to: str | None = Field(default=None, alias="SMTP_TO")
+
+    # ── Rate Limiting ────────────────────────────────────────
+    rate_limit_per_minute: int = Field(default=10, alias="RATE_LIMIT_PER_MINUTE")
+
+    # ── CORS ─────────────────────────────────────────────────
+    # Production'da virgülle ayrılmış izin verilen origin listesi.
+    # Örn: "https://guardian.company.com,https://admin.company.com"
+    # Boş veya "*" bırakılırsa tüm originlere izin verilir (yalnızca dev).
+    allowed_origins: str = Field(default="*", alias="ALLOWED_ORIGINS")
+
     # ──────────────────────────────────────────────────────────
     @property
     def prod_dsn(self) -> str:

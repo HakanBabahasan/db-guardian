@@ -165,3 +165,15 @@ def verify_daily_password(username: str, provided: str, date: datetime | None = 
     """Verilen parolayı bugünün beklenen parolasıyla karşılaştırır."""
     expected = generate_daily_password(username, date)
     return provided == expected
+
+def decode_token_ignore_exp(token: str) -> dict:
+    """
+    Token'ı imza açısından doğrular, süre dolmuşluk kontrolünü atlar.
+    SADECE refresh akışına özgeli kullanılır.
+    """
+    return jwt.decode(
+        token,
+        settings.jwt_secret_key,
+        algorithms=[settings.jwt_algorithm],
+        options={"verify_exp": False},
+    )

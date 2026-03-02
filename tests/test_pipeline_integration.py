@@ -1,13 +1,16 @@
 """
 Tam Pipeline Entegrasyon Testi (mock DB)
 
-DB bağlantısı olmadan KomutFiltresi → DiffAnaliz → KararMotoru zincirini
-baştan sona test eder. Gerçek clone/backup yerine mock kullanır.
+DB bağlantısı olmadan DiffAnaliz → KararMotoru zincirini baştan sona test eder.
+Gerçek clone/backup yerine mock kullanır.
+
+Temel ilke: karar tamamen gerçek diff'e dayanır — SQL metnine, tahmine dayalı
+kural eşleşmesine hiç bakılmaz. Sorgunun ne olduğundan bağımsız, klon üzerindeki
+değişiklik ne ise o değerlendirilir.
 """
 import pytest
 from unittest.mock import MagicMock, patch
 
-from src.core.command_filter import FilterDecision, check as filter_check
 from src.core.diff_analyzer import DiffAnalyzer
 from src.core.decision_engine import DecisionEngine
 from src.models.schemas import DecisionResult, RiskLevel
@@ -21,22 +24,15 @@ def make_snap(table: str, rows: int, columns: dict | None = None) -> dict:
 
 def run_pipeline(sql: str, prod_snap: dict, clone_snap: dict) -> tuple[str, str]:
     """
-    Simüle edilmiş tam pipeline.
+    Simüle edilmiş tam pipeline — saf diff tabanlı:
+      1. Diff analizi: prod snapshot ile klon snapshot karşılaştırılır.
+      2. Karar motoru: diff'e göre PASS / MANUAL_REVIEW / BLOCK üretir.
+    SQL metni hiç okunmaz; karar tamamen gerçek diff sonucuna dayanır.
     Returns: (decision, message)
     """
-    # Aşama 1: Komut filtresi
-    filter_result = filter_check(sql)
-    if filter_result.decision == FilterDecision.INSTANT_BLOCK:
-        return DecisionResult.INSTANT_BLOCK, filter_result.reason
-    if filter_result.decision == FilterDecision.HIGH_RISK:
-        # HIGH_RISK filtreden geçebilir ama diff analizi MANUAL_REVIEW döndürür
-        pass
-
-    # Aşama 2: Diff analizi (mock klon sonrası)
     analyzer = DiffAnalyzer()
     diff = analyzer.analyze(prod_snap, clone_snap)
 
-    # Aşama 3: Karar
     engine = DecisionEngine()
     decision, msg = engine.decide(diff)
     return decision, msg
@@ -66,26 +62,49 @@ class TestSafeScenario:
 
 
 # ─────────────────────────────────────────────────────────────
-# Senaryo 2: WHERE'siz DELETE — anında blok
+# Senaryo 2: Diff tabanlı tehlike tespiti
 # ─────────────────────────────────────────────────────────────
 
-class TestInstantBlockScenario:
+class TestDiffBasedDetection:
+    """
+    Karar SQL metninden bağımsızdır — sadece diff sonucu belirler.
 
-    def test_delete_without_where_instant_block(self):
-        sql = "DELETE FROM payments"
+    Klon snapshot prod ile aynıysa (SQL DB'yi etkilemedi) → PASS.
+    Klon snapshot değiştiyse → diff'e göre MANUAL_REVIEW veya BLOCK.
+    """
+
+    def test_no_change_in_clone_passes(self):
+        """Herhangi bir SQL — klonda değişiklik yok → PASS."""
         prod = make_snap("payments", 500)
-        decision, msg = run_pipeline(sql, prod, prod)
-        assert decision == DecisionResult.INSTANT_BLOCK
+        decision, msg = run_pipeline("DELETE FROM payments", prod, prod)
+        assert decision == DecisionResult.PASS
 
-    def test_drop_table_instant_block(self):
-        sql = "DROP TABLE payments"
-        prod = make_snap("payments", 500)
-        decision, msg = run_pipeline(sql, prod, prod)
-        assert decision == DecisionResult.INSTANT_BLOCK
+    def test_no_change_select_passes(self):
+        """SELECT bile olsa, klonda değişiklik yok → PASS."""
+        prod = make_snap("users", 1000)
+        decision, msg = run_pipeline("SELECT * FROM users", prod, prod)
+        assert decision == DecisionResult.PASS
 
-    def test_truncate_instant_block(self):
-        decision, msg = run_pipeline("TRUNCATE users", make_snap("users", 100), make_snap("users", 100))
-        assert decision == DecisionResult.INSTANT_BLOCK
+    def test_drop_table_real_diff_blocked(self):
+        """Klon snapshotı tablo silinmesini yansıtıyorsa → BLOCK."""
+        prod = {"tables": {"payments": {"row_count": 500, "columns": {"id": {"type": "integer", "nullable": False}}}}}
+        clone = {"tables": {}}  # tablo gerçekten silindi
+        decision, msg = run_pipeline("DROP TABLE payments", prod, clone)
+        assert decision == DecisionResult.BLOCK
+
+    def test_full_row_loss_blocked(self):
+        """Tüm satırlar silindi → BLOCK."""
+        prod = make_snap("users", 1000)
+        clone = make_snap("users", 0)
+        decision, msg = run_pipeline("DELETE FROM users", prod, clone)
+        assert decision == DecisionResult.BLOCK
+
+    def test_truncate_real_diff_blocked(self):
+        """TRUNCATE klonda tüm satırları sildi → BLOCK."""
+        prod = make_snap("orders", 800)
+        clone = make_snap("orders", 0)
+        decision, msg = run_pipeline("TRUNCATE orders", prod, clone)
+        assert decision == DecisionResult.BLOCK
 
 
 # ─────────────────────────────────────────────────────────────

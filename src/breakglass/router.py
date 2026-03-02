@@ -9,6 +9,7 @@ Endpoints:
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from src.breakglass.manager import breakglass_manager
+from src.config import settings
 from src.gateway.auth import generate_daily_password, get_current_user, require_role
 from src.models.schemas import BreakGlassApprove, BreakGlassStatusResponse
 
@@ -77,9 +78,21 @@ def get_daily_password(
     """
     Belirtilen yöneticinin bugünkü parolasını döner.
     SADECE admin kullanabilir — test/debug amaçlı.
+
+    ⚠️  PRODUCTION GUARD: APP_ENV=production ise bu endpoint
+    kapatılır — break-glass iki onay mekanizmasını korumak için.
     """
+    if settings.app_env.lower() == "production":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Bu endpoint production ortamında devre dışıdır.",
+        )
     try:
         pwd = generate_daily_password(username)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    return {"username": username, "daily_password": pwd, "note": "Bu endpointi production'da devre dışı bırakın."}
+    return {
+        "username": username,
+        "daily_password": pwd,
+        "note": "Yalnızca geliştirme/test ortamında kullanın.",
+    }

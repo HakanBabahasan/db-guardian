@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 import psycopg2
+from psycopg2 import sql as pgsql   # güvenli identifier quoting
 
 from src.config import settings
 
@@ -96,7 +97,7 @@ class CloneEngine:
                 """,
                 (clone_name,),
             )
-            cur.execute(f'DROP DATABASE IF EXISTS "{clone_name}"')
+            cur.execute(pgsql.SQL("DROP DATABASE IF EXISTS {}").format(pgsql.Identifier(clone_name)))
             cur.close()
         finally:
             conn.close()
@@ -107,7 +108,7 @@ class CloneEngine:
         conn.autocommit = True
         try:
             cur = conn.cursor()
-            cur.execute(f'CREATE DATABASE "{clone_name}"')
+            cur.execute(pgsql.SQL("CREATE DATABASE {}").format(pgsql.Identifier(clone_name)))
             cur.close()
         finally:
             conn.close()
@@ -206,7 +207,7 @@ class CloneEngine:
         """Belirtilen tablonun istatistiklerini döner."""
         try:
             cur = conn.cursor()
-            cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+            cur.execute(pgsql.SQL("SELECT COUNT(*) FROM {}").format(pgsql.Identifier(table)))
             row_count = cur.fetchone()[0]
 
             cur.execute(

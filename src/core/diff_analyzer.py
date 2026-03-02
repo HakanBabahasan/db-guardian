@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 import psycopg2
+from psycopg2 import sql as pgsql   # güvenli identifier quoting
 
 from src.config import settings
 from src.models.schemas import DiffResult, RiskLevel, TableDiff
@@ -101,6 +102,11 @@ class DiffAnalyzer:
                 constraint_changes.append(
                     f"{col}: nullable {p['nullable']} → {c['nullable']}"
                 )
+            # NULL oranı karşılaştırması
+            p_null = p.get("null_count", 0)
+            c_null = c.get("null_count", 0)
+            if p_null != c_null:
+                null_changes[col] = c_null - p_null
 
         return TableDiff(
             table_name=name,
@@ -234,7 +240,7 @@ def take_db_snapshot(dsn: str) -> dict:
 
     for table in tables:
         try:
-            cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+            cur.execute(pgsql.SQL("SELECT COUNT(*) FROM {}").format(pgsql.Identifier(table)))
             row_count = cur.fetchone()[0]
 
             cur.execute(
@@ -246,10 +252,24 @@ def take_db_snapshot(dsn: str) -> dict:
                 """,
                 (table,),
             )
-            columns = {
-                row[0]: {"type": row[1], "nullable": row[2] == "YES"}
-                for row in cur.fetchall()
-            }
+            columns = {}
+            for col_name, col_type, is_nullable in cur.fetchall():
+                # Her kolon için NULL sayısını hesapla
+                if row_count > 0:
+                    cur.execute(
+                        pgsql.SQL("SELECT COUNT(*) FROM {} WHERE {} IS NULL").format(
+                            pgsql.Identifier(table),
+                            pgsql.Identifier(col_name),
+                        )
+                    )
+                    null_count = cur.fetchone()[0]
+                else:
+                    null_count = 0
+                columns[col_name] = {
+                    "type": col_type,
+                    "nullable": is_nullable == "YES",
+                    "null_count": null_count,
+                }
             snapshot["tables"][table] = {"row_count": row_count, "columns": columns}
         except Exception as exc:
             logger.warning(f"Snapshot alınamadı ({table}): {exc}")

@@ -47,6 +47,7 @@ class JobStatus(str, Enum):
     APPLIED = "APPLIED"
     BLOCKED = "BLOCKED"
     FAILED = "FAILED"
+    ROLLED_BACK = "ROLLED_BACK"
 
 
 class BreakGlassStatus(str, Enum):
@@ -78,7 +79,11 @@ class UserInfo(BaseModel):
 # ── SQL Çalıştırma ───────────────────────────────────────────────────────────
 
 class ExecuteRequest(BaseModel):
-    sql: str = Field(..., description="Çalıştırılacak SQL komutu")
+    sql: str = Field(
+        ...,
+        description="Çalıştırılacak SQL komutu",
+        max_length=50_000,  # • Aşırı büyük payload'ları reddet (bellek + audit log koruması)
+    )
     description: str | None = Field(None, description="Bu değişikliğin amacı")
     target_tables: list[str] | None = Field(None, description="Etkilenen tablolar (isteğe bağlı)")
 
@@ -105,6 +110,8 @@ class JobStatusResponse(BaseModel):
     processed_at: datetime | None = None
     message: str | None = None
     diff_summary: dict[str, Any] | None = None
+    snapshot_path: str | None = None
+    can_rollback: bool = False
 
 
 # ── Diff Analizi ─────────────────────────────────────────────────────────────

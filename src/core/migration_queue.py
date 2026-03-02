@@ -32,6 +32,7 @@ class MigrationJob:
     processed_at: datetime | None = None
     message: str = ""
     diff_summary: dict[str, Any] | None = None
+    snapshot_path: str | None = None   # rollback için
     callback: Callable[["MigrationJob"], Coroutine] | None = field(
         default=None, repr=False
     )
@@ -49,6 +50,7 @@ class MigrationQueue:
         self._queue: asyncio.Queue[MigrationJob] = asyncio.Queue()
         self._jobs: dict[str, MigrationJob] = {}   # job_id → job
         self._running = False
+        self._paused = False               # rollback sırasında kuyruk duraksar
         self._worker_task: asyncio.Task | None = None
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -75,6 +77,52 @@ class MigrationQueue:
 
     def get_job(self, job_id: str) -> MigrationJob | None:
         return self._jobs.get(job_id)
+
+    def list_jobs(self) -> list[MigrationJob]:
+        """Tüm işleri (yeni→eski sırayla) listeler."""
+        return sorted(self._jobs.values(), key=lambda j: j.submitted_at, reverse=True)
+
+    def pause(self):
+        """
+        Kuyruğu duraksatır — worker mevcut işi bitirir, yeni iş almaz.
+        Rollback gibi kritik operasyonlar sırasında kullanılır.
+        """
+        self._paused = True
+        logger.warning("Migration kuyruğu duraksatıldı (PAUSED).")
+
+    def resume(self):
+        """Duraksatılmış kuyruğu sürdürür."""
+        self._paused = False
+        logger.info("Migration kuyruğu devam ettiriliyor (RESUMED).")
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def prune(self, max_size: int = 500):
+        """
+        Bellekte biriken eski işleri temizler.
+        max_size aşılırsa terminal durumdaki (APPLIED/BLOCKED/FAILED/ROLLED_BACK)
+        en eski işler silinir.
+        """
+        if len(self._jobs) <= max_size:
+            return
+        terminal = {
+            JobStatus.APPLIED, JobStatus.BLOCKED, JobStatus.FAILED, JobStatus.ROLLED_BACK
+        }
+        candidates = sorted(
+            [j for j in self._jobs.values() if j.status in terminal],
+            key=lambda j: j.submitted_at,
+        )
+        to_delete = len(self._jobs) - max_size
+        deleted = 0
+        for job in candidates:
+            if deleted >= to_delete:
+                break
+            del self._jobs[job.job_id]
+            deleted += 1
+        if deleted:
+            logger.info(f"prune(): {deleted} eski iş bellekten temizlendi.")
 
     def queue_size(self) -> int:
         return self._queue.qsize()
@@ -103,6 +151,10 @@ class MigrationQueue:
     async def _worker(self):
         """Asenkron arka plan döngüsü — işleri sırayla alır."""
         while self._running:
+            # Kuyruk duraksatıldıysa bekle
+            if self._paused:
+                await asyncio.sleep(0.3)
+                continue
             try:
                 job = await asyncio.wait_for(self._queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
