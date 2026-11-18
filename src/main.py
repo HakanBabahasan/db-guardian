@@ -47,11 +47,17 @@ async def lifespan(app: FastAPI):
     logger.info("DB Guardian başlatılıyor...")
 
     # Production'da default JWT secret ile açılmasını engelle
-    if settings.app_env == "production" and settings.jwt_secret_key == "change-this-super-secret-key-in-production":
-        raise RuntimeError(
-            "JWT_SECRET_KEY varsayılan değerle production'da çalıştırılamaz. "
-            ".env dosyasında güvenli bir secret belirleyin."
-        )
+    if settings.app_env == "production":
+        if settings.jwt_secret_key == "change-this-super-secret-key-in-production":
+            raise RuntimeError(
+                "JWT_SECRET_KEY varsayılan değerle production'da çalıştırılamaz. "
+                ".env dosyasında güvenli bir secret belirleyin."
+            )
+        if settings.breakglass_secret_key == "change-this-breakglass-secret-in-production":
+            raise RuntimeError(
+                "BREAKGLASS_SECRET_KEY varsayılan değerle production'da çalıştırılamaz. "
+                ".env dosyasında güvenli bir secret belirleyin."
+            )
 
     # Tabloları oluştur
     Base.metadata.create_all(bind=engine)
@@ -95,11 +101,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-_cors_origins = (
-    settings.allowed_origins.split(",")
-    if settings.allowed_origins and settings.allowed_origins != "*"
-    else ["*"]
-)
+_cors_origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,

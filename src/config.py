@@ -37,6 +37,9 @@ class Settings(BaseSettings):
 
     # ── Break-Glass ─────────────────────────────────────────
     breakglass_timeout_seconds: int = Field(default=900, alias="BREAKGLASS_TIMEOUT_SECONDS")
+    breakglass_secret_key: str = Field(
+        default="change-this-breakglass-secret-in-production", alias="BREAKGLASS_SECRET_KEY"
+    )
     maintenance_max_hours: int = Field(default=24, alias="MAINTENANCE_MAX_HOURS")
 
     # ── Backup ──────────────────────────────────────────────
@@ -65,7 +68,7 @@ class Settings(BaseSettings):
     # Production'da virgülle ayrılmış izin verilen origin listesi.
     # Örn: "https://guardian.company.com,https://admin.company.com"
     # Boş veya "*" bırakılırsa tüm originlere izin verilir (yalnızca dev).
-    allowed_origins: str = Field(default="*", alias="ALLOWED_ORIGINS")
+    allowed_origins: str = Field(default="http://localhost:3000", alias="ALLOWED_ORIGINS")
 
     # ──────────────────────────────────────────────────────────
     @property

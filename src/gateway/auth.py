@@ -9,6 +9,7 @@ Kullanıcı rolleri:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
@@ -166,7 +167,11 @@ def generate_daily_password(username: str, date: datetime | None = None) -> str:
         f"{user['birth_year']}"
         f"{date_str}"
     )
-    digest = hashlib.sha256(raw.encode()).hexdigest()
+    digest = hmac.new(
+        settings.breakglass_secret_key.encode(),
+        raw.encode(),
+        hashlib.sha256,
+    ).hexdigest()
     return digest[:10].upper()
 
 
@@ -175,14 +180,23 @@ def verify_daily_password(username: str, provided: str, date: datetime | None = 
     expected = generate_daily_password(username, date)
     return provided == expected
 
+_REFRESH_GRACE_MINUTES = 15
+
+
 def decode_token_ignore_exp(token: str) -> dict:
     """
     Token'ı imza açısından doğrular, süre dolmuşluk kontrolünü atlar.
-    SADECE refresh akışına özgeli kullanılır.
+    Ancak exp + grace period aşıldıysa ValueError fırlatır.
     """
-    return jwt.decode(
+    payload = jwt.decode(
         token,
         settings.jwt_secret_key,
         algorithms=[settings.jwt_algorithm],
         options={"verify_exp": False},
     )
+    exp = payload.get("exp")
+    if exp is not None:
+        deadline = datetime.fromtimestamp(exp, tz=timezone.utc) + timedelta(minutes=_REFRESH_GRACE_MINUTES)
+        if datetime.now(timezone.utc) > deadline:
+            raise ValueError("Token refresh süresi doldu (grace period aşıldı).")
+    return payload
