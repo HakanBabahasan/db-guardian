@@ -27,14 +27,16 @@ logger = logging.getLogger("guardian.auth")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
-# ── Demo kullanıcı veritabanı (gerçek uygulamada DB'den gelir) ───────────────
-# format: username → {hashed_password, role, full_name, birth_date, birth_year}
-_USERS = {
+# ── Demo kullanıcı veritabanı ────────────────────────────────────────────────
+# Yalnızca APP_ENV=development modunda yüklenir.
+# Production'da kullanıcılar harici bir kaynaktan (DB, LDAP vb.) gelmelidir.
+
+_DEMO_USERS = {
     "admin": {
         "hashed_password": pwd_context.hash("admin123"),
         "role": "admin",
         "full_name": "System Admin",
-        "birth_date": 15,   # ayın günü
+        "birth_date": 15,
         "birth_year": 1985,
     },
     "manager1": {
@@ -66,6 +68,13 @@ _USERS = {
         "birth_year": 1997,
     },
 }
+
+_USERS: dict = _DEMO_USERS if settings.app_env != "production" else {}
+
+if settings.app_env != "production":
+    logger.info("Demo kullanıcılar yüklendi (development modu).")
+else:
+    logger.warning("Production modu — demo kullanıcılar devre dışı.")
 
 
 # ── Token işlemleri ──────────────────────────────────────────────────────────

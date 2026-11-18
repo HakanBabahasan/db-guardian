@@ -46,6 +46,13 @@ async def lifespan(app: FastAPI):
     """Başlangıç ve kapatma işlemleri."""
     logger.info("DB Guardian başlatılıyor...")
 
+    # Production'da default JWT secret ile açılmasını engelle
+    if settings.app_env == "production" and settings.jwt_secret_key == "change-this-super-secret-key-in-production":
+        raise RuntimeError(
+            "JWT_SECRET_KEY varsayılan değerle production'da çalıştırılamaz. "
+            ".env dosyasında güvenli bir secret belirleyin."
+        )
+
     # Tabloları oluştur
     Base.metadata.create_all(bind=engine)
     logger.info("Veritabanı tabloları hazır.")
