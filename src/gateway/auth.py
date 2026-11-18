@@ -178,7 +178,7 @@ def generate_daily_password(username: str, date: datetime | None = None) -> str:
 def verify_daily_password(username: str, provided: str, date: datetime | None = None) -> bool:
     """Verilen parolayı bugünün beklenen parolasıyla karşılaştırır."""
     expected = generate_daily_password(username, date)
-    return provided == expected
+    return hmac.compare_digest(provided, expected)
 
 _REFRESH_GRACE_MINUTES = 15
 

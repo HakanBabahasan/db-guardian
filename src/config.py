@@ -65,9 +65,8 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = Field(default=10, alias="RATE_LIMIT_PER_MINUTE")
 
     # ── CORS ─────────────────────────────────────────────────
-    # Production'da virgülle ayrılmış izin verilen origin listesi.
+    # Virgülle ayrılmış izin verilen origin listesi.
     # Örn: "https://guardian.company.com,https://admin.company.com"
-    # Boş veya "*" bırakılırsa tüm originlere izin verilir (yalnızca dev).
     allowed_origins: str = Field(default="http://localhost:3000", alias="ALLOWED_ORIGINS")
 
     # ──────────────────────────────────────────────────────────
